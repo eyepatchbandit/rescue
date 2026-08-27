@@ -783,6 +783,7 @@ export default function IssuesContent() {
       81457: 'Blast',
       999: 'HyperEVM',
       59144: 'Linea',
+      4663: 'Robinhood Chain',
     };
     return networkNames[chainId] || `Unknown Network (Chain ID: ${chainId})`;
   };

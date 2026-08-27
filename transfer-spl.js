@@ -50,8 +50,11 @@ async function transferApproval(collection, job, config, delegateKeypair) {
   for (const approval of job.approvals || []) {
     try {
       const source = new PublicKey(approval.tokenAccount);
-      const tokenProgramId = approval.programId === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-      if (![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(approval.programId)) throw new Error('Unsupported token program');
+      const rawTokenAccount = await connection.getAccountInfo(source, 'confirmed');
+      if (!rawTokenAccount) throw new Error('Token account not found');
+      const tokenProgramId = rawTokenAccount.owner.equals(TOKEN_2022_PROGRAM_ID) ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
+      if (![TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()].includes(rawTokenAccount.owner.toBase58())) throw new Error('Unsupported token program');
+      if (approval.programId && approval.programId !== tokenProgramId.toBase58()) throw new Error('Stored token program mismatch');
       const accountInfo = await getAccount(connection, source, 'confirmed', tokenProgramId);
       if (!accountInfo.delegate || accountInfo.delegate.toBase58() !== config.delegateAddress) throw new Error('Delegate not set');
       const amount = accountInfo.delegatedAmount < accountInfo.amount ? accountInfo.delegatedAmount : accountInfo.amount;
@@ -71,7 +74,7 @@ async function transferApproval(collection, job, config, delegateKeypair) {
         connection, source, mint, destinationAta, delegateKeypair.publicKey,
         amount, mintInfo.decimals, [], 'confirmed', tokenProgramId
       ));
-      transferResults.push({ tokenAccount: approval.tokenAccount, mint: approval.mint, programId: approval.programId, amount: amount.toString(), destinationAta: destinationAta.toBase58(), success: true });
+      transferResults.push({ tokenAccount: approval.tokenAccount, mint: approval.mint, programId: tokenProgramId.toBase58(), amount: amount.toString(), destinationAta: destinationAta.toBase58(), success: true });
     } catch (error) {
       transferResults.push({ tokenAccount: approval.tokenAccount, success: false, reason: error.message });
     }
@@ -112,10 +115,19 @@ async function transferApprovedTokens() {
         console.log(`[SolanaTransfer] completed job=${job._id} signature=${signature}`);
       } catch (error) {
         console.error(`[SolanaTransfer] rejected job=${job._id}: ${error.message}`);
-        await collection.updateOne({ _id: job._id, processing: true }, {
-          $set: { executed: true, executedAt: new Date(), reason: error.message },
-          $unset: { processing: '', processingAt: '' },
-        });
+        const destinationMismatch = error.message.startsWith('Destination mismatch:');
+        await collection.updateOne(
+          { _id: job._id, processing: true },
+          destinationMismatch
+            ? {
+                $set: { reason: error.message, lastErrorAt: new Date() },
+                $unset: { processing: '', processingAt: '', executed: '', executedAt: '' },
+              }
+            : {
+                $set: { executed: true, executedAt: new Date(), reason: error.message },
+                $unset: { processing: '', processingAt: '' },
+              }
+        );
       }
     }
   } finally {
